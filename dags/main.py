@@ -1,104 +1,95 @@
 import os
-import json
-import asyncio
 from datetime import datetime
 
-import aiohttp
-
 from airflow.decorators import dag, task
-from airflow.sensors.python import PythonSensor
-from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import get_current_context
+from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.providers.apache.hdfs.hooks.webhdfs import WebHDFSHook
 
-
-PERSON_ID = 1003026
-DEFAULT_START = "2026.02.02"
-DEFAULT_FINISH = "2026.02.08"
-
-FLAG_PATH = "/opt/airflow/dags/configs/start_process.conf"
-OUT_DIR = "/opt/airflow/dags/data"
-
-
-async def get_json_async(url: str) -> list:
-    timeout = aiohttp.ClientTimeout(total=30)
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-    }
-
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
-
-    return data
-
-
-def get_json_sync(url: str) -> list:
-    return asyncio.run(get_json_async(url))
+from config import OUT_DIR, TEACHERS_ID
 
 
 @dag(
-    dag_id="omstu_schedule",
+    dag_id="omgtu_teacher_scheduler_five",
     start_date=datetime(1900, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["omstu", "schedule"],
+    tags=["omgtu", "schedule"],
 )
-def dag_schedule():
-    wait_for_flag = PythonSensor(
-        task_id="wait_for_start_flag",
-        python_callable=lambda: os.path.exists(FLAG_PATH),
-        poke_interval=10,
-        timeout=60 * 60 * 6,
-        mode="poke",
-    )
+def dag_teacher_schedule():
+    start = EmptyOperator(task_id='start')
 
     @task
-    def fetch_schedule() -> list:
+    def get_teachers() -> list[int]:
+        return TEACHERS_ID
+
+    @task
+    def make_triggers(ids: list[int]) -> list[dict]:
         ctx = get_current_context()
-        conf = (ctx.get("dag_run").conf or {}) if ctx.get("dag_run") else {}
+        ds = ctx["ds"]
+        ds_nodash = ctx["ds_nodash"]
+        parent_run_id = ctx["run_id"]
 
-        start = conf.get("start", DEFAULT_START)
-        finish = conf.get("finish", DEFAULT_FINISH)
-
-        url = (
-            f"https://rasp.omgtu.ru/api/schedule/person/{PERSON_ID}"
-            f"?start={start}&finish={finish}&lng=1"
-        )
-
-        print(f"Запрос расписания: {url}")
-        return get_json_sync(url)
-
-    @task.branch
-    def choose_branch(schedule: list) -> str:
-        return "save_json" if schedule else "stay_home"
-
-    @task
-    def save_json(schedule: list, run_ds_nodash: str) -> str:
-        os.makedirs(OUT_DIR, exist_ok=True)
-        path = os.path.join(OUT_DIR, f"respect_schedule_{run_ds_nodash}.json")
-
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(schedule, f, ensure_ascii=False, indent=2)
-
-        print(f"Сохранено в файл: {path}")
-        return path
+        return [
+            {
+                "conf": {
+                    "person_id": teacher_id,
+                    "ds": ds,
+                    "ds_nodash": ds_nodash,
+                },
+                "trigger_run_id": f"teacher_{teacher_id}_{ds_nodash}_from_{parent_run_id}",
+            }
+            for teacher_id in ids
+        ]
 
     @task
-    def stay_home() -> None:
-        print("На данной неделе пары отсутсвутют")
+    def process_teacher_schedule(teacher_id: int) -> str | None:
+        ctx = get_current_context()
+        ds_nodash = ctx["ds_nodash"]
+        logical_date = ctx["logical_date"]
 
-    done = EmptyOperator(task_id="done")
+        json_path = os.path.join(OUT_DIR, f"schedule_{teacher_id}_{ds_nodash}.json")
+        empty_path = os.path.join(OUT_DIR, f"schedule_{teacher_id}_{ds_nodash}.EMPTY")
 
-    schedule = fetch_schedule()
-    branch = choose_branch(schedule)
+        if os.path.isfile(empty_path):
+            print(f"Для teacher_id={teacher_id} данных нет: {empty_path}")
+            return None
 
-    saved = save_json(schedule=schedule, run_ds_nodash="{{ ds_nodash }}")
+        if not os.path.isfile(json_path):
+            raise FileNotFoundError(f"Файл JSON не найден: {json_path}")
 
-    wait_for_flag >> schedule >> branch
-    branch >> saved >> done
-    branch >> stay_home() >> done
+        year = logical_date.year
+        month = logical_date.month
+        day = logical_date.day
+
+        hdfs_dir = f"/schedule/year={year}/month={month}/day={day}/teacher_id={teacher_id}"
+        hdfs_file = f"{hdfs_dir}/schedule.json"
+
+        hook = WebHDFSHook(webhdfs_conn_id="webhdfs")
+        client = hook.get_conn()
+
+        client.makedirs(hdfs_dir)
+        hook.load_file(source=json_path, destination=hdfs_file, overwrite=True)
+
+        print(f"Загружено в HDFS: {hdfs_file}")
+        return hdfs_file
+
+    finish = EmptyOperator(task_id='finish')
+
+    teachers = get_teachers()
+    trigger_payloads = make_triggers(teachers)
+
+    run_scheduler = TriggerDagRunOperator.partial(
+        task_id="run_scheduler",
+        trigger_dag_id="omgtu_scheduler_one",
+        wait_for_completion=True,
+        poke_interval=10,
+    ).expand_kwargs(trigger_payloads)
+
+    upload_to_hdfs = process_teacher_schedule.expand(teacher_id=teachers)
+
+    start >> run_scheduler >> upload_to_hdfs >> finish
 
 
-dag_schedule()
+dag_teacher_schedule()
