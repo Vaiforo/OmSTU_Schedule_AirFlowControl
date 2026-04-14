@@ -119,6 +119,23 @@ services:
       - ./hadoop.env
     depends_on:
       - namenode
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse-db-volume:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: airflow
+      CLICKHOUSE_DB: rasp_omgtu
   postgres:
     image: postgres:16
     environment:
@@ -368,3 +385,4 @@ volumes:
   postgres-db-volume:
   hadoop_namenode:
   hadoop_datanode:
+  clickhouse-db-volume:

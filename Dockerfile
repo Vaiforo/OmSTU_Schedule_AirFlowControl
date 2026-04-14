@@ -17,4 +17,6 @@ USER airflow
 RUN pip install --no-cache-dir \
     airflow-code-editor \
     hdfs \
-    apache-airflow-providers-apache-hdfs
+    apache-airflow-providers-apache-hdfs \
+    pyspark \
+    clickhouse-connect
