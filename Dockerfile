@@ -8,13 +8,19 @@ RUN apt-get update \
          libkrb5-dev \
          libsasl2-dev \
          libssl-dev \
+         openjdk-17-jre-headless \
   && apt-get autoremove -yqq --purge \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 USER airflow
 
 RUN pip install --no-cache-dir \
     airflow-code-editor \
     hdfs \
-    apache-airflow-providers-apache-hdfs
+    apache-airflow-providers-apache-hdfs \
+    pyspark \
+    clickhouse-connect
