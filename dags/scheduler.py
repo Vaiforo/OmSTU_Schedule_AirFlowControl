@@ -36,7 +36,7 @@ def get_json_sync(url: str) -> list:
     start_date=datetime(1900, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["omgtu", "respect", "schedule"],
+    tags=["omgtu", "schedule", "raw"],
 )
 def dag_schedule():
     start = EmptyOperator(task_id="start")
@@ -48,13 +48,15 @@ def dag_schedule():
         dag_run = ctx.get("dag_run")
         conf = dag_run.conf if dag_run and dag_run.conf else {}
 
-        person_id = int(conf.get("person_id", DEFAULT_PERSON_ID))
+        target_type = conf.get("type", "person")
+        target_id = int(conf.get("id", DEFAULT_PERSON_ID))
         ds_nodash = conf.get("ds_nodash") or ctx["ds_nodash"]
 
         raw_processing_date = conf.get("processing_date")
         logical_date: pendulum.DateTime = (
-            pendulum.parse(
-                raw_processing_date) if raw_processing_date else ctx["logical_date"]
+            pendulum.parse(raw_processing_date)
+            if raw_processing_date
+            else ctx["logical_date"]
         )
 
         week_start = logical_date.start_of("week")
@@ -64,25 +66,28 @@ def dag_schedule():
         finish_value = conf.get("finish", week_end.format("YYYY.MM.DD"))
 
         params = {
-            "person_id": person_id,
+            "type": target_type,
+            "id": target_id,
             "processing_date": logical_date.to_date_string(),
             "ds_nodash": ds_nodash,
             "start": start_value,
             "finish": finish_value,
         }
 
-        print(f"Получили person_id={person_id}")
+        print(f"Получили target_type={target_type}, target_id={target_id}")
         print(f"Период запроса: {start_value} - {finish_value}")
         return params
 
     @task
     def fetch_schedule(run_payload: dict) -> dict:
-        person_id = run_payload["person_id"]
+        target_type = run_payload["type"]
+        target_id = run_payload["id"]
         start_value = run_payload["start"]
         finish_value = run_payload["finish"]
 
         url = (
-            f"https://rasp.omgtu.ru/api/schedule/person/{person_id}?start={start_value}&finish={finish_value}&lng=1"
+            f"https://rasp.omgtu.ru/api/schedule/{target_type}/{target_id}"
+            f"?start={start_value}&finish={finish_value}&lng=1"
         )
 
         print(f"Запрос расписания: {url}")
@@ -93,14 +98,21 @@ def dag_schedule():
     def save_result(payload: dict) -> str:
         params = payload["params"]
         schedule = payload["schedule"]
-        person_id = params["person_id"]
+
+        target_type = params["type"]
+        target_id = params["id"]
         ds_nodash = params["ds_nodash"]
 
         os.makedirs(OUT_DIR, exist_ok=True)
+
         json_path = os.path.join(
-            OUT_DIR, f"schedule_{person_id}_{ds_nodash}.json")
+            OUT_DIR,
+            f"schedule_{target_type}_{target_id}_{ds_nodash}.json",
+        )
         empty_path = os.path.join(
-            OUT_DIR, f"schedule_{person_id}_{ds_nodash}.EMPTY")
+            OUT_DIR,
+            f"schedule_{target_type}_{target_id}_{ds_nodash}.EMPTY",
+        )
 
         for path in (json_path, empty_path):
             if os.path.exists(path):
@@ -114,6 +126,7 @@ def dag_schedule():
 
         with open(empty_path, "w", encoding="utf-8") as f:
             f.write("no data")
+
         print(f"Расписания нет, создан маркер: {empty_path}")
         return empty_path
 

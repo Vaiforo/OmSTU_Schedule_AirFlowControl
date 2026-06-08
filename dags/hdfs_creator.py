@@ -10,7 +10,13 @@ from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.apache.hdfs.hooks.webhdfs import WebHDFSHook
 from airflow.sdk import Asset
 
-from config import BRONZE_ASSET_URI, BRONZE_BASE_DIR, OUT_DIR, TEACHERS_ID, WEBHDFS_CONN_ID
+from config import (
+    BRONZE_ASSET_URI,
+    BRONZE_BASE_DIR,
+    OUT_DIR,
+    TARGETS,
+    WEBHDFS_CONN_ID,
+)
 
 BRONZE_SCHEDULE_ASSET = Asset(uri=BRONZE_ASSET_URI, name="bronze_schedule")
 
@@ -22,53 +28,64 @@ BRONZE_SCHEDULE_ASSET = Asset(uri=BRONZE_ASSET_URI, name="bronze_schedule")
     catchup=False,
     tags=["omgtu", "schedule", "bronze"],
 )
-def dag_teacher_schedule():
+def dag_target_schedule():
     start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish")
 
     @task
-    def get_teachers() -> list[int]:
-        return TEACHERS_ID
+    def get_targets() -> list[dict]:
+        return TARGETS
 
     @task
-    def make_triggers(ids: list[int]) -> list[dict]:
+    def make_triggers(targets: list[dict]) -> list[dict]:
         ctx = get_current_context()
-        logical_date = ctx["logical_date"]
+        logical_date: pendulum.DateTime = ctx["logical_date"]
         ds_nodash = ctx["ds_nodash"]
         parent_run_id = ctx["run_id"]
 
         week_start = logical_date.start_of("week").format("YYYY.MM.DD")
-        week_end = logical_date.start_of(
-            "week").add(days=6).format("YYYY.MM.DD")
+        week_end = logical_date.start_of("week").add(days=6).format("YYYY.MM.DD")
         processing_date = logical_date.strftime("%Y-%m-%d")
 
         return [
             {
                 "conf": {
-                    "person_id": teacher_id,
+                    "type": target["type"],
+                    "id": target["id"],
                     "processing_date": processing_date,
                     "ds_nodash": ds_nodash,
                     "start": week_start,
                     "finish": week_end,
                 },
-                "trigger_run_id": f"teacher_{teacher_id}_{ds_nodash}_from_{parent_run_id}",
+                "trigger_run_id": (
+                    f"{target['type']}_{target['id']}_{ds_nodash}_from_{parent_run_id}"
+                ),
             }
-            for teacher_id in ids
+            for target in targets
         ]
 
     @task
-    def process_teacher_schedule(teacher_id: int) -> str | None:
+    def process_target_schedule(target: dict) -> str | None:
+        target_type = target["type"]
+        target_id = target["id"]
+
         ctx = get_current_context()
         ds_nodash = ctx["ds_nodash"]
         logical_date: pendulum.DateTime = ctx["logical_date"]
 
         json_path = os.path.join(
-            OUT_DIR, f"schedule_{teacher_id}_{ds_nodash}.json")
+            OUT_DIR,
+            f"schedule_{target_type}_{target_id}_{ds_nodash}.json",
+        )
         empty_path = os.path.join(
-            OUT_DIR, f"schedule_{teacher_id}_{ds_nodash}.EMPTY")
+            OUT_DIR,
+            f"schedule_{target_type}_{target_id}_{ds_nodash}.EMPTY",
+        )
 
         if os.path.isfile(empty_path):
-            print(f"Для teacher_id={teacher_id} данных нет: {empty_path}")
+            print(
+                f"Для target_type={target_type}, target_id={target_id} данных нет: {empty_path}"
+            )
             return None
 
         if not os.path.isfile(json_path):
@@ -78,7 +95,10 @@ def dag_teacher_schedule():
         month = logical_date.month
         day = logical_date.day
 
-        hdfs_dir = f"{BRONZE_BASE_DIR}/year={year}/month={month}/day={day}/teacher_id={teacher_id}"
+        hdfs_dir = (
+            f"{BRONZE_BASE_DIR}/year={year}/month={month}/day={day}"
+            f"/type={target_type}/id={target_id}"
+        )
         hdfs_file = f"{hdfs_dir}/schedule.json"
 
         hook = WebHDFSHook(webhdfs_conn_id=WEBHDFS_CONN_ID)
@@ -93,9 +113,9 @@ def dag_teacher_schedule():
     @task(outlets=[BRONZE_SCHEDULE_ASSET])
     def publish_bronze_ready(hdfs_files: list[str | None], *, outlet_events) -> dict:
         actual_files = [path for path in hdfs_files if path]
+
         if not actual_files:
-            raise AirflowSkipException(
-                "Нет JSON-файлов в Bronze за этот запуск")
+            raise AirflowSkipException("Нет JSON-файлов в Bronze за этот запуск")
 
         ctx = get_current_context()
         logical_date: pendulum.DateTime = ctx["logical_date"]
@@ -104,11 +124,12 @@ def dag_teacher_schedule():
         year = logical_date.year
         month = logical_date.month
         day = logical_date.day
+
         week_start = logical_date.start_of("week").format("YYYY.MM.DD")
-        week_end = logical_date.start_of(
-            "week").add(days=6).format("YYYY.MM.DD")
+        week_end = logical_date.start_of("week").add(days=6).format("YYYY.MM.DD")
 
         bronze_day_path = f"{BRONZE_BASE_DIR}/year={year}/month={month}/day={day}"
+
         event_extra = {
             "processing_date": processing_date,
             "year": year,
@@ -120,12 +141,14 @@ def dag_teacher_schedule():
             "files_count": len(actual_files),
             "files": actual_files,
         }
+
         outlet_events[BRONZE_SCHEDULE_ASSET].extra = event_extra
+
         print(f"Опубликовано событие Bronze asset: {event_extra}")
         return event_extra
 
-    teachers = get_teachers()
-    trigger_payloads = make_triggers(teachers)
+    targets = get_targets()
+    trigger_payloads = make_triggers(targets)
 
     run_scheduler = TriggerDagRunOperator.partial(
         task_id="run_scheduler",
@@ -134,10 +157,10 @@ def dag_teacher_schedule():
         poke_interval=10,
     ).expand_kwargs(trigger_payloads)
 
-    upload_to_hdfs = process_teacher_schedule.expand(teacher_id=teachers)
+    upload_to_hdfs = process_target_schedule.expand(target=targets)
     bronze_ready = publish_bronze_ready(upload_to_hdfs)
 
-    start >> teachers >> trigger_payloads >> run_scheduler >> upload_to_hdfs >> bronze_ready >> finish
+    start >> targets >> trigger_payloads >> run_scheduler >> upload_to_hdfs >> bronze_ready >> finish
 
 
-dag_teacher_schedule()
+dag_target_schedule()

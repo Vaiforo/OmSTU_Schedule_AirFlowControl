@@ -1,14 +1,28 @@
-DEFAULT_START = "2026.02.09"
-DEFAULT_FINISH = "2026.02.14"
+DEFAULT_START = "2026.05.11"
+DEFAULT_FINISH = "2026.05.17"
 DEFAULT_PERSON_ID = 1003026
 
 FLAG_PATH = "/opt/airflow/dags/configs/start_process.conf"
 OUT_DIR = "/opt/airflow/dags/data"
 
-TEACHERS_ID = [1003026, 782898, 1001117, 36240, 1001142]
+TARGETS = [
+    {"type": "person", "id": 1003026},  # Гуненков
+    {"type": "person", "id": 782898},  # Шарун
+    {"type": "person", "id": 1001117},  # Гулянов
+    {"type": "person", "id": 36240},  # Мунько
+    {"type": "person", "id": 1001142},  # Плескунов
+
+    {"type": "group", "id": 484},  # МО-231
+    {"type": "group", "id": 687},  # ФИТ-231
+    {"type": "group", "id": 688},  # ФИТ-232
+    {"type": "auditorium", "id": 177},  # 8-201
+    {"type": "auditorium", "id": 175},  # 8-204
+    {"type": "auditorium", "id": 38},  # Г-331
+    {"type": "auditorium", "id": 596},  # Г-411
+]
 
 WEBHDFS_CONN_ID = "webhdfs"
-CLICKHOUSE_CONN_ID = "clickhouse_http"
+CLICKHOUSE_CONN_ID = "clickhouse"
 CLICKHOUSE_DATABASE = "rasp_omgtu"
 CLICKHOUSE_TABLE = "schedule_lessons"
 

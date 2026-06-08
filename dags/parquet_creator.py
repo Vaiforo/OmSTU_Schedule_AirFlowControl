@@ -22,8 +22,8 @@ BRONZE_SCHEDULE_ASSET = Asset(uri=BRONZE_ASSET_URI, name="bronze_schedule")
 
 CLICKHOUSE_PARQUET_STRUCTURE = """
 processing_date Date,
-source_teacher_id UInt32,
-bronze_file_path String,
+target_type String,
+target_id UInt32,
 ingested_at DateTime,
 lesson_oid Nullable(UInt64),
 lesson_date Nullable(Date),
@@ -80,6 +80,7 @@ def dag_silver_clickhouse():
     @task(inlets=[BRONZE_SCHEDULE_ASSET])
     def get_asset_event_context(*, inlet_events) -> dict:
         events = inlet_events[BRONZE_SCHEDULE_ASSET]
+
         if not events:
             raise AirflowSkipException("Нет событий Bronze asset")
 
@@ -91,9 +92,7 @@ def dag_silver_clickhouse():
         files = extra.get("files") or []
 
         if not processing_date or not bronze_day_path:
-            raise ValueError(
-                f"Недостаточно данных в asset event extra: {extra}"
-            )
+            raise ValueError(f"Недостаточно данных в asset event extra: {extra}")
 
         processing_dt = datetime.strptime(processing_date, "%Y-%m-%d")
         year = processing_dt.year
@@ -106,7 +105,7 @@ def dag_silver_clickhouse():
             "processing_date": processing_date,
             "bronze_day_path": bronze_day_path,
             "bronze_paths": bronze_paths,
-            "bronze_glob": f"{HDFS_URI}{bronze_day_path}/teacher_id=*/schedule.json",
+            "bronze_glob": f"{HDFS_URI}{bronze_day_path}/type=*/id=*/schedule.json",
             "silver_root_uri": f"{HDFS_URI}{SILVER_BASE_DIR}",
             "silver_partition_glob": (
                 f"{HDFS_URI}{SILVER_BASE_DIR}/year={year}/month={month}/day={day}/*.parquet"
@@ -136,7 +135,11 @@ def dag_silver_clickhouse():
         spark.sparkContext.setLogLevel("WARN")
 
         try:
-            read_source = payload["bronze_paths"] if payload["bronze_paths"] else payload["bronze_glob"]
+            read_source = (
+                payload["bronze_paths"]
+                if payload["bronze_paths"]
+                else payload["bronze_glob"]
+            )
 
             raw_df = (
                 spark.read.option("multiLine", True)
@@ -145,59 +148,66 @@ def dag_silver_clickhouse():
             )
 
             if not raw_df.head(1):
-                raise AirflowSkipException(
-                    "В Bronze нет JSON-файлов для преобразования")
+                raise AirflowSkipException("В Bronze нет JSON-файлов для преобразования")
 
             processing_date_col = F.to_date(F.lit(payload["processing_date"]))
 
-            teacher_id_match = F.regexp_extract(
+            target_type_col = F.regexp_extract(
                 F.col("bronze_file_path"),
-                r"teacher_id=(\d+)",
+                r"type=([^/]+)",
                 1,
             )
-            source_teacher_id_col = (
-                F.when(F.length(teacher_id_match) > 0,
-                       teacher_id_match.cast("int"))
+
+            target_id_match = F.regexp_extract(
+                F.col("bronze_file_path"),
+                r"id=(\d+)",
+                1,
+            )
+
+            target_id_col = (
+                F.when(F.length(target_id_match) > 0, target_id_match.cast("int"))
                 .otherwise(F.lit(None).cast("int"))
             )
 
             silver_df = (
                 raw_df.select(
                     processing_date_col.alias("processing_date"),
-                    source_teacher_id_col.alias("source_teacher_id"),
-                    F.col("bronze_file_path"),
+                    target_type_col.alias("target_type"),
+                    target_id_col.alias("target_id"),
                     F.current_timestamp().alias("ingested_at"),
                     safe_long("lessonOid").alias("lesson_oid"),
-                    F.to_date(F.col("date"), "yyyy.MM.dd").alias(
-                        "lesson_date"),
+                    F.to_date(F.col("date"), "yyyy.MM.dd").alias("lesson_date"),
                     safe_int("dayOfWeek").alias("day_of_week"),
-                    F.coalesce(F.col("beginLesson"), F.lit("")).cast(
-                        "string").alias("begin_lesson"),
-                    F.coalesce(F.col("endLesson"), F.lit("")).cast(
-                        "string").alias("end_lesson"),
+                    F.coalesce(F.col("beginLesson"), F.lit("")).cast("string").alias("begin_lesson"),
+                    F.coalesce(F.col("endLesson"), F.lit("")).cast("string").alias("end_lesson"),
                     safe_int("lessonNumberStart").alias("lesson_number_start"),
                     safe_int("lessonNumberEnd").alias("lesson_number_end"),
                     safe_int("duration").alias("duration"),
-                    F.coalesce(F.col("discipline"), F.lit("")).cast(
-                        "string").alias("discipline"),
+                    F.coalesce(F.col("discipline"), F.lit("")).cast("string").alias("discipline"),
                     safe_int("disciplineOid").alias("discipline_oid"),
-                    F.coalesce(F.col("kindOfWork"), F.lit("")).cast(
-                        "string").alias("kind_of_work"),
+                    F.coalesce(F.col("kindOfWork"), F.lit("")).cast("string").alias("kind_of_work"),
                     safe_int("kindOfWorkOid").alias("kind_of_work_oid"),
-                    F.coalesce(F.col("lecturer"), F.lit("")).cast(
-                        "string").alias("lecturer"),
+                    F.coalesce(F.col("lecturer"), F.lit("")).cast("string").alias("lecturer"),
                     safe_int("lecturerOid").alias("lecturer_oid"),
-                    F.coalesce(F.col("subGroup"), F.lit("")).cast(
-                        "string").alias("subgroup"),
+                    F.coalesce(F.col("subGroup"), F.lit("")).cast("string").alias("subgroup"),
                     safe_int("subGroupOid").alias("subgroup_oid"),
-                    F.coalesce(F.col("building"), F.lit("")).cast(
-                        "string").alias("building"),
+                    F.coalesce(F.col("building"), F.lit("")).cast("string").alias("building"),
                     safe_int("buildingOid").alias("building_oid"),
-                    F.coalesce(F.col("auditorium"), F.lit("")).cast(
-                        "string").alias("auditorium"),
+                    F.coalesce(F.col("auditorium"), F.lit("")).cast("string").alias("auditorium"),
                     safe_int("auditoriumOid").alias("auditorium_oid"),
                 )
-                .filter(F.col("source_teacher_id").isNotNull())
+                .filter(F.col("target_id").isNotNull())
+                .dropDuplicates(
+                    [
+                        "lesson_oid",
+                        "lesson_date",
+                        "begin_lesson",
+                        "end_lesson",
+                        "lecturer_oid",
+                        "subgroup_oid",
+                        "auditorium_oid",
+                    ]
+                )
                 .withColumn("year", F.year("processing_date"))
                 .withColumn("month", F.month("processing_date"))
                 .withColumn("day", F.dayofmonth("processing_date"))
@@ -205,7 +215,8 @@ def dag_silver_clickhouse():
 
             if not silver_df.head(1):
                 raise AirflowSkipException(
-                    "После очистки и преобразования не осталось строк для записи")
+                    "После очистки и преобразования не осталось строк для записи"
+                )
 
             rows_count = silver_df.count()
 
@@ -243,8 +254,8 @@ def dag_silver_clickhouse():
         CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}
         (
             processing_date Date,
-            source_teacher_id UInt32,
-            bronze_file_path String,
+            target_type String,
+            target_id UInt32,
             ingested_at DateTime,
             lesson_oid Nullable(UInt64),
             lesson_date Nullable(Date),
@@ -287,8 +298,8 @@ def dag_silver_clickhouse():
         INSERT INTO {CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}
         SELECT
             processing_date,
-            source_teacher_id,
-            bronze_file_path,
+            target_type,
+            target_id,
             ingested_at,
             lesson_oid,
             lesson_date,
